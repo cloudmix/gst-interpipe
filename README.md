@@ -1,5 +1,5 @@
 # GstInterpipe 1.0
-GstInterpipe is a Gstreamer plug-in that allows communication between
+stInterpipe is a Gstreamer plug-in that allows communication between
 two independent pipelines. The plug-in consists of two elements:
 - interpipesink
 - interpipesrc
