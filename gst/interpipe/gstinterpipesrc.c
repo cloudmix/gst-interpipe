@@ -54,6 +54,12 @@ GST_DEBUG_CATEGORY_STATIC (gst_inter_pipe_src_debug);
 
 enum
 {
+  SIGNAL_DISCONNECTED,
+  LAST_SIGNAL
+};
+
+enum
+{
   PROP_0,
   PROP_LISTEN_TO,
   PROP_BLOCK_SWITCH,
@@ -94,6 +100,8 @@ static gboolean gst_inter_pipe_src_stop (GstBaseSrc * base);
 static gboolean gst_inter_pipe_src_event (GstBaseSrc * base, GstEvent * event);
 static void gst_inter_pipe_ilistener_init (GstInterPipeIListenerInterface *
     iface);
+
+static guint interpipesrc_signals[LAST_SIGNAL] = { 0 };
 
 
 typedef enum
@@ -226,6 +234,10 @@ gst_inter_pipe_src_class_init (GstInterPipeSrcClass * klass)
   basesrc_class->stop = GST_DEBUG_FUNCPTR (gst_inter_pipe_src_stop);
   basesrc_class->event = GST_DEBUG_FUNCPTR (gst_inter_pipe_src_event);
   basesrc_class->create = GST_DEBUG_FUNCPTR (gst_inter_pipe_src_create);
+
+  interpipesrc_signals[SIGNAL_DISCONNECTED] =
+      g_signal_new ("disconnected", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
 }
 
 static void
@@ -562,6 +574,11 @@ gst_inter_pipe_src_node_removed (GstInterPipeIListener * iface,
 
   // NOTE(mgi): previously this called 'gst_inter_pipe_leave_node'
   // I don't believe this is the correct behaviour, as the node in question (the sink) has been removed
+
+  if (!g_strcmp0 (src->listen_to, node_name)) {
+    g_signal_emit (G_OBJECT (iface), interpipesrc_signals[SIGNAL_DISCONNECTED],
+        0, node_name);
+  }
 
   return TRUE;
 }
