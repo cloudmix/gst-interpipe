@@ -343,6 +343,7 @@ gst_inter_pipe_notify_node_removed (gpointer _listener_name, gpointer _listener,
   GST_INFO ("Notifying node removed: %s", node_name);
 
   gst_inter_pipe_ilistener_node_removed (listener, node_name);
+  listener_priv->listen_to = NULL;
 }
 
 gboolean

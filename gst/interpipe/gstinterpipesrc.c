@@ -559,9 +559,9 @@ gst_inter_pipe_src_node_removed (GstInterPipeIListener * iface,
   src = GST_INTER_PIPE_SRC (iface);
 
   GST_INFO_OBJECT (src, "Node %s removed. Leaving.", node_name);
-  if (g_strcmp0 (src->listen_to, node_name) == 0) {
-    gst_inter_pipe_leave_node (iface);
-  }
+
+  // NOTE(mgi): previously this called 'gst_inter_pipe_leave_node'
+  // I don't believe this is the correct behaviour, as the node in question (the sink) has been removed
 
   return TRUE;
 }
