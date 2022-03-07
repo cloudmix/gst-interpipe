@@ -505,6 +505,25 @@ gst_inter_pipe_src_create (GstBaseSrc * base, guint64 offset, guint size,
         "Got event with timestamp %" GST_TIME_FORMAT,
         GST_TIME_ARGS (GST_EVENT_TIMESTAMP (serial_event)));
 
+    if (GST_EVENT_TYPE (serial_event) == GST_EVENT_SEGMENT) {
+      const GstSegment *segment = NULL;
+
+      gst_event_parse_segment (serial_event, &segment);
+      if (segment == NULL) {
+        GST_ERROR_OBJECT (src,
+            "Couldn't parse received segment %" GST_PTR_FORMAT, serial_event);
+        return GST_FLOW_ERROR;
+      }
+
+      GST_DEBUG_OBJECT (src, "Update new segment %" GST_PTR_FORMAT,
+          serial_event);
+      if (!gst_base_src_new_segment (base, segment)) {
+        GST_ERROR_OBJECT (src, "Couldn't set new segment %" GST_PTR_FORMAT,
+            serial_event);
+        return GST_FLOW_ERROR;
+      }
+    }
+
     curr_bytes = gst_app_src_get_current_level_bytes (GST_APP_SRC (src));
     if ((GST_EVENT_TIMESTAMP (serial_event) < GST_BUFFER_PTS (*buf))
         || (curr_bytes == 0)) {
@@ -726,12 +745,10 @@ gst_inter_pipe_src_push_event (GstInterPipeIListener * iface, GstEvent * event,
     guint64 basetime)
 {
   GstInterPipeSrc *src;
-  GstAppSrc *appsrc;
   GstPad *srcpad;
   gboolean ret = TRUE;
 
   src = GST_INTER_PIPE_SRC (iface);
-  appsrc = GST_APP_SRC (src);
   srcpad = GST_INTER_PIPE_SRC_PAD (src);
 
   if (!src->accept_events)
@@ -744,21 +761,6 @@ gst_inter_pipe_src_push_event (GstInterPipeIListener * iface, GstEvent * event,
 
     ret = gst_pad_push_event (srcpad, event);
   } else {
-    if (GST_EVENT_TYPE (event) == GST_EVENT_SEGMENT) {
-      GstSegment segment;
-      guint64 srcbasetime;
-
-      srcbasetime = gst_element_get_base_time (GST_ELEMENT (appsrc));
-
-      /* copy segment values */
-      gst_event_copy_segment (event, &segment);
-      gst_event_unref (event);
-
-      gst_segment_offset_running_time (&segment, segment.format,
-          srcbasetime - basetime);
-      event = gst_event_new_segment (&segment);
-    }
-
     g_queue_push_tail (src->pending_serial_events, event);
   }
   return ret;
