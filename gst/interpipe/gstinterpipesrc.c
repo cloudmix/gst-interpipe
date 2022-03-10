@@ -54,6 +54,12 @@ GST_DEBUG_CATEGORY_STATIC (gst_inter_pipe_src_debug);
 
 enum
 {
+  SIGNAL_DISCONNECTED,
+  LAST_SIGNAL
+};
+
+enum
+{
   PROP_0,
   PROP_LISTEN_TO,
   PROP_BLOCK_SWITCH,
@@ -94,6 +100,8 @@ static gboolean gst_inter_pipe_src_stop (GstBaseSrc * base);
 static gboolean gst_inter_pipe_src_event (GstBaseSrc * base, GstEvent * event);
 static void gst_inter_pipe_ilistener_init (GstInterPipeIListenerInterface *
     iface);
+
+static guint interpipesrc_signals[LAST_SIGNAL] = { 0 };
 
 
 typedef enum
@@ -226,6 +234,10 @@ gst_inter_pipe_src_class_init (GstInterPipeSrcClass * klass)
   basesrc_class->stop = GST_DEBUG_FUNCPTR (gst_inter_pipe_src_stop);
   basesrc_class->event = GST_DEBUG_FUNCPTR (gst_inter_pipe_src_event);
   basesrc_class->create = GST_DEBUG_FUNCPTR (gst_inter_pipe_src_create);
+
+  interpipesrc_signals[SIGNAL_DISCONNECTED] =
+      g_signal_new ("disconnected", G_TYPE_FROM_CLASS (klass),
+      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 1, G_TYPE_STRING);
 }
 
 static void
@@ -426,6 +438,8 @@ gst_inter_pipe_src_stop (GstBaseSrc * base)
     GST_INFO_OBJECT (src, "Removing listener from node %s", src->listen_to);
     gst_inter_pipe_leave_node (listener);
     src->listening = FALSE;
+    g_free (src->listen_to);
+    src->listen_to = NULL;
   }
 
   return basesrc_class->stop (base);
@@ -442,7 +456,7 @@ gst_inter_pipe_src_event (GstBaseSrc * base, GstEvent * event)
   src = GST_INTER_PIPE_SRC (base);
   node = gst_inter_pipe_get_node (src->listen_to);
 
-  if (GST_EVENT_IS_UPSTREAM (event)) {
+  if (GST_EVENT_IS_UPSTREAM (event) && GST_EVENT_TYPE (event) != GST_EVENT_QOS && GST_EVENT_TYPE (event) != GST_EVENT_LATENCY) {        // skip forwarding of certain events
 
     GST_INFO_OBJECT (src, "Incoming upstream event %s",
         GST_EVENT_TYPE_NAME (event));
@@ -482,7 +496,7 @@ gst_inter_pipe_src_create (GstBaseSrc * base, guint64 offset, guint size,
       "Dequeue buffer %p with timestamp (PTS) %" GST_TIME_FORMAT, *buf,
       GST_TIME_ARGS (GST_BUFFER_PTS (*buf)));
 
-  if (!g_queue_is_empty (src->pending_serial_events)) {
+  while (!g_queue_is_empty (src->pending_serial_events)) {
     guint curr_bytes;
     /*Pending Serial Events Queue */
     serial_event = g_queue_peek_head (src->pending_serial_events);
@@ -490,6 +504,25 @@ gst_inter_pipe_src_create (GstBaseSrc * base, guint64 offset, guint size,
     GST_DEBUG_OBJECT (src,
         "Got event with timestamp %" GST_TIME_FORMAT,
         GST_TIME_ARGS (GST_EVENT_TIMESTAMP (serial_event)));
+
+    if (GST_EVENT_TYPE (serial_event) == GST_EVENT_SEGMENT) {
+      const GstSegment *segment = NULL;
+
+      gst_event_parse_segment (serial_event, &segment);
+      if (segment == NULL) {
+        GST_ERROR_OBJECT (src,
+            "Couldn't parse received segment %" GST_PTR_FORMAT, serial_event);
+        return GST_FLOW_ERROR;
+      }
+
+      GST_DEBUG_OBJECT (src, "Update new segment %" GST_PTR_FORMAT,
+          serial_event);
+      if (!gst_base_src_new_segment (base, segment)) {
+        GST_ERROR_OBJECT (src, "Couldn't set new segment %" GST_PTR_FORMAT,
+            serial_event);
+        return GST_FLOW_ERROR;
+      }
+    }
 
     curr_bytes = gst_app_src_get_current_level_bytes (GST_APP_SRC (src));
     if ((GST_EVENT_TIMESTAMP (serial_event) < GST_BUFFER_PTS (*buf))
@@ -504,6 +537,7 @@ gst_inter_pipe_src_create (GstBaseSrc * base, guint64 offset, guint size,
       GST_DEBUG_OBJECT (src, "Event %s timestamp is greater than the "
           "buffer timestamp, can't send serial event yet",
           GST_EVENT_TYPE_NAME (serial_event));
+      break;
     }
   }
 
@@ -556,8 +590,13 @@ gst_inter_pipe_src_node_removed (GstInterPipeIListener * iface,
   src = GST_INTER_PIPE_SRC (iface);
 
   GST_INFO_OBJECT (src, "Node %s removed. Leaving.", node_name);
-  if (g_strcmp0 (src->listen_to, node_name) == 0) {
-    gst_inter_pipe_leave_node (iface);
+
+  // NOTE(mgi): previously this called 'gst_inter_pipe_leave_node'
+  // I don't believe this is the correct behaviour, as the node in question (the sink) has been removed
+
+  if (!g_strcmp0 (src->listen_to, node_name)) {
+    g_signal_emit (G_OBJECT (iface), interpipesrc_signals[SIGNAL_DISCONNECTED],
+        0, node_name);
   }
 
   return TRUE;
@@ -632,7 +671,8 @@ gst_inter_pipe_src_push_buffer (GstInterPipeIListener * iface,
   src = GST_INTER_PIPE_SRC (iface);
   appsrc = GST_APP_SRC (src);
 
-  GST_LOG_OBJECT (src, "Incoming buffer: %p", buffer);
+  GST_LOG_OBJECT (src, "Incoming buffer: %" GST_TIME_FORMAT,
+      GST_TIME_ARGS (GST_BUFFER_PTS (buffer)));
 
   if (GST_STATE (GST_ELEMENT (appsrc)) < GST_STATE_PAUSED) {
     gst_buffer_unref (buffer);
@@ -680,6 +720,7 @@ gst_inter_pipe_src_push_buffer (GstInterPipeIListener * iface,
         GST_TIME_ARGS (GST_BUFFER_PTS (buffer)));
   } else if (GST_INTER_PIPE_SRC_RESTART_TIMESTAMP == src->stream_sync) {
     /* Remove the incoming timestamp to be generated according this basetime */
+    buffer = gst_buffer_make_writable (buffer);
     GST_BUFFER_PTS (buffer) = GST_CLOCK_TIME_NONE;
     GST_BUFFER_DTS (buffer) = GST_CLOCK_TIME_NONE;
   }
@@ -704,13 +745,10 @@ gst_inter_pipe_src_push_event (GstInterPipeIListener * iface, GstEvent * event,
     guint64 basetime)
 {
   GstInterPipeSrc *src;
-  GstAppSrc *appsrc;
   GstPad *srcpad;
-  guint64 srcbasetime;
   gboolean ret = TRUE;
 
   src = GST_INTER_PIPE_SRC (iface);
-  appsrc = GST_APP_SRC (src);
   srcpad = GST_INTER_PIPE_SRC_PAD (src);
 
   if (!src->accept_events)
@@ -723,23 +761,6 @@ gst_inter_pipe_src_push_event (GstInterPipeIListener * iface, GstEvent * event,
 
     ret = gst_pad_push_event (srcpad, event);
   } else {
-
-    event = gst_event_make_writable (event);
-    srcbasetime = gst_element_get_base_time (GST_ELEMENT (appsrc));
-
-    if (srcbasetime > basetime) {
-      GST_EVENT_TIMESTAMP (event) =
-          GST_EVENT_TIMESTAMP (event) - (srcbasetime - basetime);
-    } else {
-      GST_EVENT_TIMESTAMP (event) =
-          GST_EVENT_TIMESTAMP (event) + (basetime - srcbasetime);
-    }
-
-    GST_DEBUG_OBJECT (src,
-        "Event %s with calculated timestamp %" GST_TIME_FORMAT
-        " enqueued on serial pending events", GST_EVENT_TYPE_NAME (event),
-        GST_TIME_ARGS (GST_EVENT_TIMESTAMP (event)));
-
     g_queue_push_tail (src->pending_serial_events, event);
   }
   return ret;

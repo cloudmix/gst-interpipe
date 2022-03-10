@@ -55,7 +55,8 @@ enum
   PROP_0,
   PROP_FORWARD_EOS,
   PROP_FORWARD_EVENTS,
-  PROP_NUM_LISTENERS
+  PROP_NUM_LISTENERS,
+  PROP_ALLOW_UPSTREAM_EVENTS,
 };
 
 static void gst_inter_pipe_sink_update_node_name (GstInterPipeSink * sink,
@@ -110,6 +111,9 @@ struct _GstInterPipeSink
 
   /** Enable EOS notify */
   gboolean forward_eos;
+
+  /** Allow upstream events */
+  gboolean allow_upstream_events;
 
   /** Last caps */
   GstCaps *caps;
@@ -171,6 +175,11 @@ gst_inter_pipe_sink_class_init (GstInterPipeSinkClass * klass)
           "Number of interpipe sources listening to this specific sink",
           0, G_MAXUINT, 0, G_PARAM_READABLE));
 
+  g_object_class_install_property (gobject_class, PROP_ALLOW_UPSTREAM_EVENTS,
+      g_param_spec_boolean ("allow-upstream-events", "Allow upstream events",
+          "Allow upstream events to be passed from a single listener (disabled if more than one listener)",
+          TRUE, G_PARAM_WRITABLE | G_PARAM_STATIC_STRINGS));
+
   basesink_class->get_caps = GST_DEBUG_FUNCPTR (gst_inter_pipe_sink_get_caps);
   basesink_class->set_caps = GST_DEBUG_FUNCPTR (gst_inter_pipe_sink_set_caps);
   basesink_class->event = GST_DEBUG_FUNCPTR (gst_inter_pipe_sink_event);
@@ -204,7 +213,8 @@ gst_inter_pipe_sink_init (GstInterPipeSink * sink)
   sink->node_name = NULL;
   sink->listeners = g_hash_table_new (g_direct_hash, g_direct_equal);
   sink->forward_eos = FALSE;
-  sink->forward_events = TRUE;
+  sink->forward_events = FALSE;
+  sink->allow_upstream_events = TRUE;
   sink->last_buffer_timestamp = 0;
 
   g_mutex_init (&sink->listeners_mutex);
@@ -250,6 +260,9 @@ gst_inter_pipe_sink_set_property (GObject * object, guint prop_id,
       break;
     case PROP_FORWARD_EVENTS:
       sink->forward_events = g_value_get_boolean (value);
+      break;
+    case PROP_ALLOW_UPSTREAM_EVENTS:
+      sink->allow_upstream_events = g_value_get_boolean (value);
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -884,18 +897,11 @@ gst_inter_pipe_sink_receive_event (GstInterPipeINode * iface, GstEvent * event)
   self = GST_INTER_PIPE_SINK (iface);
   listeners = GST_INTER_PIPE_SINK_LISTENERS (self);
 
-  if (g_hash_table_size (listeners) != 1) {
+  if (g_hash_table_size (listeners) != 1 && self->allow_upstream_events) {
     gst_event_unref (event);
-    goto multiple_listeners;
+    return FALSE;
   }
 
   sinkpad = GST_INTER_PIPE_SINK_PAD (self);
   return gst_pad_push_event (sinkpad, event);
-
-multiple_listeners:
-  {
-    GST_WARNING_OBJECT (self, "Could not send event upstream, "
-        "more than one listener is connected");
-    return FALSE;
-  }
 }
