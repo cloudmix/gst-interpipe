@@ -64,7 +64,6 @@ enum
   PROP_LISTEN_TO,
   PROP_BLOCK_SWITCH,
   PROP_ALLOW_RENEGOTIATION,
-  PROP_STREAM_SYNC,
   PROP_ACCEPT_EVENTS,
   PROP_ACCEPT_EOS_EVENT
 };
@@ -104,34 +103,6 @@ static void gst_inter_pipe_ilistener_init (GstInterPipeIListenerInterface *
 static guint interpipesrc_signals[LAST_SIGNAL] = { 0 };
 
 
-typedef enum
-{
-  GST_INTER_PIPE_SRC_RESTART_TIMESTAMP,
-  GST_INTER_PIPE_SRC_PASSTHROUGH_TIMESTAMP,
-  GST_INTER_PIPE_SRC_COMPENSATE_TIMESTAMP
-} GstInterPipeSrcStreamSync;
-
-
-#define GST_TYPE_INTER_PIPE_SRC_STREAM_SYNC (gst_inter_pipe_src_stream_sync_get_type ())
-static GType
-gst_inter_pipe_src_stream_sync_get_type (void)
-{
-  static GType inter_pipe_src_stream_sync_type = 0;
-  static const GEnumValue stream_sync_types[] = {
-    {GST_INTER_PIPE_SRC_RESTART_TIMESTAMP, "Restart Timestamp", "restart-ts"},
-    {GST_INTER_PIPE_SRC_PASSTHROUGH_TIMESTAMP, "Passthrough Timestamp",
-        "passthrough-ts"},
-    {GST_INTER_PIPE_SRC_COMPENSATE_TIMESTAMP, "Compensate Timestamp",
-        "compensate-ts"},
-    {0, NULL, NULL}
-  };
-  if (!inter_pipe_src_stream_sync_type) {
-    inter_pipe_src_stream_sync_type =
-        g_enum_register_static ("GstInterPipeSrcStreamSync", stream_sync_types);
-  }
-  return inter_pipe_src_stream_sync_type;
-}
-
 struct _GstInterPipeSrc
 {
   GstAppSrc parent;
@@ -153,9 +124,6 @@ struct _GstInterPipeSrc
 
   /* Allow caps renegotiation */
   gboolean allow_renegotiation;
-
-  /* Stream synchronization */
-  GstInterPipeSrcStreamSync stream_sync;
 
   /* Accept the events received from the interpipesink */
   gboolean accept_events;
@@ -213,13 +181,6 @@ gst_inter_pipe_src_class_init (GstInterPipeSrcClass * klass)
           "caps only if the allow-renegotiation property is set to true",
           TRUE, G_PARAM_WRITABLE | G_PARAM_STATIC_STRINGS));
 
-  g_object_class_install_property (gobject_class, PROP_STREAM_SYNC,
-      g_param_spec_enum ("stream-sync", "Stream Synchronization",
-          "Define buffer synchronization between the different pipelines",
-          GST_TYPE_INTER_PIPE_SRC_STREAM_SYNC,
-          GST_INTER_PIPE_SRC_PASSTHROUGH_TIMESTAMP,
-          G_PARAM_WRITABLE | G_PARAM_STATIC_STRINGS));
-
   g_object_class_install_property (gobject_class, PROP_ACCEPT_EVENTS,
       g_param_spec_boolean ("accept-events", "Accept Events",
           "Accept the events received from the interpipesink",
@@ -251,7 +212,6 @@ gst_inter_pipe_src_init (GstInterPipeSrc * src)
   src->block_switch = FALSE;
   src->allow_renegotiation = TRUE;
   src->first_switch = TRUE;
-  src->stream_sync = GST_INTER_PIPE_SRC_PASSTHROUGH_TIMESTAMP;
   src->accept_events = TRUE;
   src->accept_eos_event = TRUE;
 }
@@ -317,9 +277,6 @@ gst_inter_pipe_src_set_property (GObject * object, guint prop_id,
     case PROP_ALLOW_RENEGOTIATION:
       src->allow_renegotiation = g_value_get_boolean (value);
       break;
-    case PROP_STREAM_SYNC:
-      src->stream_sync = g_value_get_enum (value);
-      break;
     case PROP_ACCEPT_EVENTS:
       src->accept_events = g_value_get_boolean (value);
       break;
@@ -351,9 +308,6 @@ gst_inter_pipe_src_get_property (GObject * object, guint prop_id,
       break;
     case PROP_ALLOW_RENEGOTIATION:
       g_value_set_boolean (value, src->allow_renegotiation);
-      break;
-    case PROP_STREAM_SYNC:
-      g_value_set_enum (value, src->stream_sync);
       break;
     case PROP_ACCEPT_EVENTS:
       g_value_set_boolean (value, src->accept_events);
@@ -415,9 +369,6 @@ gst_inter_pipe_src_start (GstBaseSrc * base)
   }
 
 start_done:
-  if (GST_INTER_PIPE_SRC_RESTART_TIMESTAMP == src->stream_sync)
-    gst_base_src_set_do_timestamp (base, TRUE);
-
   return TRUE;
 start_fail:
   return FALSE;
@@ -666,7 +617,6 @@ gst_inter_pipe_src_push_buffer (GstInterPipeIListener * iface,
   GstInterPipeSrc *src;
   GstAppSrc *appsrc;
   GstFlowReturn ret;
-  guint64 srcbasetime;
 
   src = GST_INTER_PIPE_SRC (iface);
   appsrc = GST_APP_SRC (src);
@@ -679,65 +629,11 @@ gst_inter_pipe_src_push_buffer (GstInterPipeIListener * iface,
     goto out;
   }
 
-  if (GST_INTER_PIPE_SRC_COMPENSATE_TIMESTAMP == src->stream_sync) {
-    guint64 difftime;
-
-    buffer = gst_buffer_make_writable (buffer);
-
-    srcbasetime = gst_element_get_base_time (GST_ELEMENT (appsrc));
-
-    GST_LOG_OBJECT (src, "Incoming Buffer timestamp (pts): %" GST_TIME_FORMAT,
-        GST_TIME_ARGS (GST_BUFFER_PTS (buffer)));
-    GST_LOG_OBJECT (src, "My Base Time: %" GST_TIME_FORMAT,
-        GST_TIME_ARGS (srcbasetime));
-    GST_LOG_OBJECT (src, "Node Base Time: %" GST_TIME_FORMAT,
-        GST_TIME_ARGS (basetime));
-
-    if (GST_STATE (src) == GST_STATE_PLAYING) {
-      if (srcbasetime > basetime) {
-        difftime = srcbasetime - basetime;
-        if (GST_BUFFER_PTS (buffer) >= difftime) {
-          GST_BUFFER_PTS (buffer) = GST_BUFFER_PTS (buffer) - difftime;
-          GST_BUFFER_DTS (buffer) = GST_BUFFER_DTS (buffer) - difftime;
-        } else {
-          gst_buffer_unref (buffer);
-          goto nosync;
-        }
-      } else {
-        difftime = basetime - srcbasetime;
-        GST_BUFFER_PTS (buffer) = GST_BUFFER_PTS (buffer) + difftime;
-        GST_BUFFER_DTS (buffer) = GST_BUFFER_DTS (buffer) + difftime;
-      }
-    } else {
-      /* srcbasetime is only valid when PLAYING, no adjustment can be done */
-      GST_LOG_OBJECT (src, "Not PLAYING state yet");
-      gst_buffer_unref (buffer);
-      goto nosync;
-    }
-
-    GST_LOG_OBJECT (src,
-        "Calculated Buffer Timestamp (PTS): %" GST_TIME_FORMAT,
-        GST_TIME_ARGS (GST_BUFFER_PTS (buffer)));
-  } else if (GST_INTER_PIPE_SRC_RESTART_TIMESTAMP == src->stream_sync) {
-    /* Remove the incoming timestamp to be generated according this basetime */
-    buffer = gst_buffer_make_writable (buffer);
-    GST_BUFFER_PTS (buffer) = GST_CLOCK_TIME_NONE;
-    GST_BUFFER_DTS (buffer) = GST_CLOCK_TIME_NONE;
-  }
-
   ret = gst_app_src_push_buffer (appsrc, buffer);
   if (ret != GST_FLOW_OK)
     return FALSE;
 out:
   return TRUE;
-
-nosync:
-  {
-    GST_WARNING_OBJECT (src, "Buffers running time can not be synchronized yet"
-        " with the interpipesrc running time");
-    return FALSE;
-  }
-
 }
 
 static gboolean
