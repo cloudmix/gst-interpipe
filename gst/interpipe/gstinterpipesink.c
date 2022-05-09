@@ -125,6 +125,9 @@ struct _GstInterPipeSink
   guint64 last_buffer_timestamp;
 
   GMutex listeners_mutex;
+
+  /** Store segment event to send out to listeners **/
+  GstEvent *segment_event;
 };
 
 struct _GstInterPipeSinkClass
@@ -317,6 +320,8 @@ gst_inter_pipe_sink_finalize (GObject * object)
   if (sink->caps_negotiated) {
     gst_caps_unref (sink->caps_negotiated);
   }
+
+  gst_event_replace (&sink->segment_event, NULL);
 
   g_hash_table_destroy (sink->listeners);
 
@@ -594,6 +599,10 @@ gst_inter_pipe_sink_event (GstBaseSink * base, GstEvent * event)
   g_mutex_lock (&sink->listeners_mutex);
   listeners = GST_INTER_PIPE_SINK_LISTENERS (sink);
 
+  if (GST_EVENT_TYPE (event) == GST_EVENT_SEGMENT) {
+    gst_event_replace (&sink->segment_event, event);
+  }
+
   if (sink->forward_events) {
     data_array[0] = sink;
     data_array[1] = event;
@@ -741,6 +750,7 @@ gst_inter_pipe_sink_add_listener (GstInterPipeINode * iface,
   const gchar *listener_name;
   GstCaps *srccaps, *sinkcaps;
   gboolean src_negotiated;
+  gpointer data_array[2];
 
   g_return_val_if_fail (iface, FALSE);
   g_return_val_if_fail (listener, FALSE);
@@ -808,6 +818,11 @@ add_to_list:
   g_mutex_lock (&sink->listeners_mutex);
   if (g_hash_table_contains (listeners, listener_name))
     goto already_registered;
+
+  /* send segment event to new listener */
+  data_array[0] = sink;
+  data_array[1] = sink->segment_event;
+  gst_inter_pipe_sink_forward_event (NULL, listener, data_array);
 
   g_hash_table_insert (listeners, (gpointer) listener_name,
       (gpointer) listener);
