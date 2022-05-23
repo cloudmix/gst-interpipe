@@ -820,9 +820,12 @@ add_to_list:
     goto already_registered;
 
   /* send segment event to new listener */
-  data_array[0] = sink;
-  data_array[1] = sink->segment_event;
-  gst_inter_pipe_sink_forward_event (NULL, listener, data_array);
+  if (sink->segment_event) {
+    data_array[0] = sink;
+    data_array[1] = sink->segment_event;
+    GST_INFO_OBJECT (sink, "Forwarding segment event to new listener");
+    gst_inter_pipe_sink_forward_event (NULL, listener, data_array);
+  }
 
   g_hash_table_insert (listeners, (gpointer) listener_name,
       (gpointer) listener);
